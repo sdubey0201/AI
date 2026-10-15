@@ -1,0 +1,26 @@
+# Python virtual environment
+.venv/
+
+# ChromaDB persistent storage (rebuilt by running ingest.py)
+chroma_db/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Distribution / packaging
+*.egg-info/
+dist/
+build/
+
+# Environment variable files
+.env
+.env.*
+
+# macOS metadata
+.DS_Store
+
+# IDE folders
+.idea/
+.vscode/
