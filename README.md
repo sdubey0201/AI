@@ -86,17 +86,59 @@ rag-assistant/
 
 ## Configuration (`config.py`)
 
+All tuneable values live in `config.py`. Change a value there and it takes effect across all scripts — no need to edit `ingest.py` or `query.py`.
+
+### Directories
+
 | Constant | Value | Description |
 |----------|-------|-------------|
-| `DOCUMENT_DIR` | `documents/` | Folder scanned for `.md` files |
-| `DB_DIR` | `chroma_db/` | On-disk ChromaDB storage |
-| `COLLECTION_NAME` | `kubernetes_docs` | ChromaDB collection name |
-| `EMBEDDING_MODEL` | `sentence-transformers/all-MiniLM-L6-v2` | Local HuggingFace embedding model |
-| `CHUNK_SIZE` | `128` | Max tokens per chunk |
-| `CHUNK_OVERLAP` | `40` | Token overlap between consecutive chunks |
-| `SIMILARITY_TOP_K` | `3` | Number of chunks returned per query |
-| `MIN_SIMILARITY_SCORE` | `0.35` | Minimum cosine similarity score — results below this are discarded |
-| `RAG_PROMPT_TEMPLATE` | *(multiline string)* | Prompt sent to the LLM; injects `{context}` and `{question}` placeholders |
+| `BASE_DIR` | *(resolved at runtime)* | Absolute path to the project root — derived from `__file__` so scripts work from any directory |
+| `DOCUMENT_DIR` | `documents/` | Folder scanned by `ingest.py` for `.md` knowledge base files |
+| `DB_DIR` | `chroma_db/` | On-disk ChromaDB storage — created automatically, do not edit manually |
+
+### Vector database
+
+| Constant | Value | Description |
+|----------|-------|-------------|
+| `COLLECTION_NAME` | `kubernetes_docs` | Logical bucket inside ChromaDB holding all vectors — changing this requires a full re-ingestion |
+
+### Embedding model
+
+| Constant | Value | Description |
+|----------|-------|-------------|
+| `EMBEDDING_MODEL` | `sentence-transformers/all-MiniLM-L6-v2` | HuggingFace model that converts text to 384-dim vectors — **must match** between `ingest.py` and `query.py` |
+
+### Chunking
+
+| Constant | Value | Description |
+|----------|-------|-------------|
+| `CHUNK_SIZE` | `128` | Max tokens per chunk — smaller = more precise retrieval; larger = more context per chunk |
+| `CHUNK_OVERLAP` | `40` | Tokens shared between consecutive chunks — prevents sentences being cut at boundaries |
+
+### Retrieval
+
+| Constant | Value | Description |
+|----------|-------|-------------|
+| `SIMILARITY_TOP_K` | `3` | Candidate chunks returned by ChromaDB before the similarity filter is applied |
+| `MIN_SIMILARITY_SCORE` | `0.35` | Quality gate — chunks below this cosine similarity score are discarded; range `0.0–1.0` |
+
+### Answer generation
+
+| Constant | Value | Description |
+|----------|-------|-------------|
+| `RAG_PROMPT_TEMPLATE` | *(multiline string)* | Instruction prompt sent to the LLM; injects `{context}` (retrieved chunks) and `{question}` (user's question); instructs the LLM not to hallucinate |
+
+### Conversation memory
+
+| Constant | Value | Description |
+|----------|-------|-------------|
+| `TOKEN_LIMIT` | `2000` | Max tokens kept in `ChatMemoryBuffer`; oldest messages are dropped when exceeded to prevent LLM context window overflow |
+
+### Query rewriting
+
+| Constant | Value | Description |
+|----------|-------|-------------|
+| `QUERY_REWRITE_PROMPT_TEMPLATE` | *(multiline string)* | Sent to the LLM before retrieval when history exists; rewrites ambiguous follow-ups into standalone questions by resolving pronouns using `{history}` and `{question}` |
 
 ---
 
