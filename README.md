@@ -252,6 +252,206 @@ returning exactly the paragraph that answers the question rather than an entire 
 
 ---
 
+## Architecture — How It Evolved
+
+Each version added one layer to the pipeline. Read these diagrams top-to-bottom to see exactly what changed at each step.
+
+---
+
+### v0.1.0 — Single-file prototype (`rag.py`)
+> Load → Chunk → Embed → Store → Retrieve (all in one script, hardcoded values)
+
+```
+documents/kubernetes_architecture.md
+        │
+        ▼  rag.py (everything in one file)
+    SimpleDirectoryReader  →  loads .md files
+        │
+        ▼
+    SentenceSplitter  (chunk_size=200, overlap=30)
+        │
+        ▼
+    HuggingFaceEmbedding  (all-MiniLM-L6-v2)  →  384-dim vectors
+        │
+        ▼
+    ChromaDB  (chroma_db/, collection="kubernetes_docs")
+        │
+        ▼
+    Retriever  (top_k=3)  →  retrieve("Why can a pod remain Pending?")
+        │
+        ▼
+    Print raw chunks + similarity scores
+```
+
+---
+
+### v0.2.0 — Separated ingestion from querying + centralised config
+> Split into `ingest.py` + `query.py` + `config.py`; no more hardcoded values
+
+```
+config.py  ←─────────────────────────────────────────────────────────┐
+  DOCUMENT_DIR, DB_DIR, COLLECTION_NAME,                              │
+  EMBEDDING_MODEL, CHUNK_SIZE=128, CHUNK_OVERLAP=40                   │
+                                                                       │
+ingest.py  (run once)                  query.py  (run interactively)  │
+──────────────────────                 ──────────────────────────────  │
+SimpleDirectoryReader                  chromadb.PersistentClient      │
+        │                                      │                       │
+SentenceSplitter                       VectorStoreIndex               ├─ reads config
+        │                              .from_vector_store()            │
+HuggingFaceEmbedding                           │                       │
+        │                              as_retriever(top_k=3)          │
+ChromaDB  (persist)                            │                       │
+                                       user input loop                │
+                                               │                       │
+                                       retrieve(question)             │
+                                               │                       │
+                                       print raw chunks + scores      │
+```
+
+---
+
+### v0.3.0 — Similarity threshold filter
+> Added quality gate: discard chunks below MIN_SIMILARITY_SCORE before showing results
+
+```
+query.py
+    │
+    ▼
+retrieve(question)  →  [chunk1: 0.91, chunk2: 0.74, chunk3: 0.21]
+    │
+    ▼
+    ┌─────────────────────────────────────┐
+    │  Filter: score >= MIN_SIMILARITY_SCORE (0.35)  │
+    └─────────────────────────────────────┘
+    │                         │
+    ▼ pass                    ▼ fail
+[chunk1, chunk2]          "No relevant information found"
+    │
+    ▼
+print results
+```
+
+---
+
+### v0.4.0 — LLM answer generation (complete RAG pipeline)
+> Added Ollama LLM: retrieved chunks become context, LLM synthesises an answer
+
+```
+query.py
+    │
+    ▼
+retrieve + filter  →  relevant_chunks
+    │
+    ▼
+context = join(relevant_chunks)
+    │
+    ▼
+RAG_PROMPT_TEMPLATE.format(context=..., question=...)
+    │
+    ▼
+Ollama llama3.2:latest  (local HTTP call to localhost:11434)
+    │
+    ▼
+print Answer
+    │
+    ▼
+print Sources  (file_name + score per chunk)
+```
+
+---
+
+### v0.4.1 — Knowledge base expanded
+> Added Containers + Pods sections to `kubernetes_architecture.md`
+
+```
+documents/kubernetes_architecture.md
+    ├── # Kubernetes Architecture   (v0.1.0)
+    ├── ## Control Plane            (v0.1.0)
+    ├── ## Worker Nodes             (v0.1.0)
+    ├── ## Troubleshooting          (v0.1.0)
+    ├── ## Containers               (v0.4.1) ← NEW
+    └── ## Pods                     (v0.4.1) ← NEW
+```
+
+> After adding sections: re-run `python ingest.py` to re-index.
+
+---
+
+### v0.4.2 — Debug logging
+> Added visibility into retrieval: print raw scores before and after filtering
+
+```
+query.py — after retrieve()
+    │
+    ▼
+[DEBUG] print all results with scores   ← NEW
+    │
+    ▼
+filter by MIN_SIMILARITY_SCORE
+    │
+    ▼
+[DEBUG] print threshold + before/after counts   ← NEW
+    │
+    ▼
+... rest of pipeline
+```
+
+---
+
+### v0.5.0 — Conversation memory + query rewriting (current)
+> Full multi-turn pipeline: memory buffer tracks history, LLM rewrites follow-up questions before retrieval
+
+```
+query.py  (current architecture)
+    │
+    ▼
+user input: question
+    │
+    ▼
+ChatMemoryBuffer.get()  →  chat_history  (capped at TOKEN_LIMIT=2000 tokens)
+    │
+    ├─ history empty? ──────────────────────────────────────────────────┐
+    │                                                                    │
+    ▼  history exists                                                    │
+QUERY_REWRITE_PROMPT_TEMPLATE                                           │
+  .format(history=..., question=...)                                    │
+    │                                                                    │
+    ▼                                                                    │
+Ollama  →  rewritten_question  (pronouns resolved)                     │
+    │                                                                    │
+    └────────────────────────────────────────────────────────────────── ┘
+    ▼  (use rewritten_question for retrieval, original for answer prompt)
+HuggingFaceEmbedding  →  embed rewritten_question
+    │
+    ▼
+ChromaDB cosine-similarity search  (top_k=3)
+    │
+    ▼
+Filter: score >= MIN_SIMILARITY_SCORE (0.35)
+    │
+    ├─ no results? → "No relevant information found"
+    │
+    ▼  results pass
+context = join(relevant_chunks)
+    │
+    ▼
+RAG_PROMPT_TEMPLATE.format(context=..., question=original)
+  + prepend conversation history
+    │
+    ▼
+Ollama llama3.2:latest  →  answer
+    │
+    ▼
+memory.put(USER: question)
+memory.put(ASSISTANT: answer)
+    │
+    ▼
+print Answer + Sources
+```
+
+---
+
 ## Extending the Application
 
 | Goal | What to do |
@@ -278,6 +478,37 @@ Format: `[vX.Y] YYYY-MM-DD — Short title` followed by bullet points.
 
 ---
 
+### [v0.5.0] — Conversation memory and query rewriting
+
+**Files changed:** `query.py`, `config.py`
+
+- **Added** `ChatMemoryBuffer` to `query.py` — maintains rolling conversation history
+  across turns within a session; capped at `TOKEN_LIMIT = 2000` tokens
+- **Added** `TOKEN_LIMIT = 2000` constant to `config.py`
+- **Added** `QUERY_REWRITE_PROMPT_TEMPLATE` to `config.py` — instructs the LLM to
+  rewrite follow-up questions into standalone questions by resolving pronouns
+  ("it", "they", "that") using conversation history
+- **Added** query rewriting step before retrieval — if history exists the follow-up
+  is rewritten and printed as `"Search question:"` alongside the original
+- **Added** history injection into answer prompt — conversation history prepended to
+  `RAG_PROMPT_TEMPLATE` so the LLM can refer to earlier turns
+- **Added** memory save after each answer — user question and LLM answer stored via
+  `memory.put(ChatMessage(...))` with `MessageRole.USER` and `MessageRole.ASSISTANT`
+- **Added** new imports: `ChatMemoryBuffer`, `ChatMessage`, `MessageRole`
+- **Effect:** the assistant now supports **multi-turn conversations** — follow-up
+  questions like *"What about its networking?"* are resolved correctly using prior context
+
+---
+
+### [v0.4.3] — Clean `requirements.txt`, update README install command
+
+**Files changed:** `requirements.txt`, `README.md`
+
+- **Replaced** 137-line `pip freeze` output with 7 direct dependencies only
+- **Updated** README install step to `pip install -r requirements.txt`
+
+---
+
 ### [v0.4.2] — Debug logging added to `query.py`
 
 **Files changed:** `query.py`
@@ -290,6 +521,8 @@ Format: `[vX.Y] YYYY-MM-DD — Short title` followed by bullet points.
   development; helps tune `CHUNK_SIZE`, `CHUNK_OVERLAP`, and `MIN_SIMILARITY_SCORE`
 - **Note:** this is development/learning instrumentation — remove or guard behind a
   `DEBUG` flag before using in production
+- **Learning note:** observability during development is as important as the feature itself;
+  seeing raw scores helps you understand what the model actually finds relevant
 
 ---
 
@@ -302,9 +535,11 @@ Format: `[vX.Y] YYYY-MM-DD — Short title` followed by bullet points.
 - **Added** `## Pods` section — explains Pods as the smallest deployable unit in
   Kubernetes; covers multi-container pods, shared network, and shared storage volumes
 - **Removed** the old `## Troubleshooting` inline gap (blank line cleaned up)
-- **Effect:** the knowledge base now covers 5 topics (Architecture, Control Plane,
-  Worker Nodes, Containers, Pods, Troubleshooting); re-run `ingest.py` to index
-  the new content before querying
+- **Effect:** the knowledge base now covers 6 topics — Architecture, Control Plane,
+  Worker Nodes, Containers, Pods, Troubleshooting
+- **Action required:** re-run `python ingest.py` to re-index the expanded knowledge base
+- **Learning note:** the quality of a RAG system is directly limited by the quality and
+  coverage of its knowledge base — richer documents = better answers
 
 ---
 
@@ -329,8 +564,10 @@ Format: `[vX.Y] YYYY-MM-DD — Short title` followed by bullet points.
   the LLM answer replaces it
 - **Effect:** the application is now a **complete RAG pipeline** — retrieval + generation.
   Users receive a synthesised natural-language answer, not raw document fragments.
-- **Dependency added:** `llama-index-llms-ollama` (install with pip); Ollama must be
-  running locally with `llama3.2:latest` pulled
+- **Dependency added:** `llama-index-llms-ollama`; Ollama must be running locally with
+  `llama3.2:latest` pulled (`ollama pull llama3.2:latest`)
+- **Learning note:** the prompt template is the most important tuning lever — how you
+  instruct the LLM to use context directly controls answer quality and hallucination risk
 
 ---
 
@@ -340,11 +577,15 @@ Format: `[vX.Y] YYYY-MM-DD — Short title` followed by bullet points.
 
 - **Added** `MIN_SIMILARITY_SCORE = 0.35` constant to `config.py`
 - **Added** post-retrieval filter in `query.py` — results with a cosine similarity score
-  below `MIN_SIMILARITY_SCORE` are discarded before printing
+  below `MIN_SIMILARITY_SCORE` are discarded before the prompt is built
 - **Added** graceful message `"No relevant information found in the knowledge base."`
   when all retrieved results fall below the threshold
 - **Effect:** prevents the assistant from confidently returning irrelevant chunks when
   the question is outside the scope of the indexed documents
+- **Tuning guide:** lower the value (e.g. `0.2`) for more results; raise it (e.g. `0.5`)
+  for stricter precision — adjust in `config.py`
+- **Learning note:** without a threshold, a vector search always returns the top-k results
+  even when none of them are actually relevant — a threshold adds a quality gate
 
 ---
 
@@ -361,6 +602,8 @@ Format: `[vX.Y] YYYY-MM-DD — Short title` followed by bullet points.
 - **Changed** `CHUNK_SIZE` from `40` → `128` tokens; `CHUNK_OVERLAP` from `5` → `40` tokens
   for better semantic coherence per chunk
 - **Kept** `rag.py` as the original single-file prototype for reference
+- **Learning note:** separating ingestion from querying means you only pay the cost of
+  embedding once — query.py reuses the stored vectors on every run without re-processing documents
 
 ---
 

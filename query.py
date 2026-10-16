@@ -1,9 +1,12 @@
 
 import chromadb
+
 from llama_index.core import VectorStoreIndex
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from llama_index.vector_stores.chroma import ChromaVectorStore
 from llama_index.llms.ollama import Ollama
+from llama_index.core.memory import ChatMemoryBuffer
+from llama_index.core.llms import ChatMessage, MessageRole
 
 from config import (
     DB_DIR,
@@ -11,12 +14,18 @@ from config import (
     EMBEDDING_MODEL,
     MIN_SIMILARITY_SCORE,
     RAG_PROMPT_TEMPLATE,
+    TOKEN_LIMIT,
+    QUERY_REWRITE_PROMPT_TEMPLATE,
 )
 
 llm = Ollama(
     model="llama3.2:latest",
     request_timeout=120.0,
     context_window=4096,
+)
+
+memory = ChatMemoryBuffer.from_defaults(
+    token_limit=TOKEN_LIMIT
 )
 
 
@@ -63,8 +72,44 @@ def main():
         if not question:
             continue
 
-        # 6. Retrieve relevant chunks
-        results = retriever.retrieve(question)
+        # 6. Read conversation history BEFORE retrieval
+        chat_history = memory.get()
+
+        history_text = "\n".join(
+            f"{message.role.value}: {message.content}"
+            for message in chat_history
+        )
+
+        # 7. Rewrite follow-up questions before retrieval
+        rewritten_question = question
+
+        if chat_history:
+            try:
+                rewrite_prompt = (
+                    QUERY_REWRITE_PROMPT_TEMPLATE.format(
+                        history=history_text,
+                        question=question,
+                    )
+                )
+
+                rewrite_response = llm.complete(rewrite_prompt)
+                candidate_question = rewrite_response.text.strip()
+
+                if candidate_question:
+                    rewritten_question = candidate_question
+
+            except Exception as exc:
+                print(
+                    f"\nQuery rewriting failed: {exc}"
+                )
+                print("Using the original question instead.")
+
+        print(f"\nOriginal question: {question}")
+        print(f"Search question: {rewritten_question}")
+
+        # 8. Retrieve using the rewritten question
+        results = retriever.retrieve(rewritten_question)
+
         print("\nDebug: Retrieved results before filtering")
 
         for rank, result in enumerate(results, start=1):
@@ -72,12 +117,14 @@ def main():
             print(f"Similarity score: {result.score}")
             print(result.node.get_content())
 
+        # 9. Filter results by similarity threshold
         relevant_results = [
             result
             for result in results
             if result.score is not None
             and result.score >= MIN_SIMILARITY_SCORE
         ]
+
         print(f"\nConfigured threshold: {MIN_SIMILARITY_SCORE}")
         print(f"Results before filtering: {len(results)}")
         print(f"Results after filtering: {len(relevant_results)}")
@@ -89,27 +136,50 @@ def main():
             )
             continue
 
-        # 7. Build context
+        # 10. Build context from relevant documents
         context = "\n\n".join(
             result.node.get_content()
             for result in relevant_results
         )
 
-        # 8. Build prompt using config.py
+        # 11. Build the answer prompt
         prompt = RAG_PROMPT_TEMPLATE.format(
             context=context,
             question=question,
         )
 
-        # 9. Generate answer with local Ollama model
+        prompt = f"""
+Conversation history:
+{history_text if history_text else "No previous conversation."}
+
+{prompt}
+"""
+
+        # 12. Generate answer using local Ollama
         try:
             response = llm.complete(prompt)
+            answer = response.text.strip()
 
             print("\nAnswer:")
-            print(response.text.strip())
+            print(answer)
 
-            # 10. Display source information
+            # 13. Save successful interaction to memory
+            memory.put(
+                ChatMessage(
+                    role=MessageRole.USER,
+                    content=question,
+                )
+            )
+            memory.put(
+                ChatMessage(
+                    role=MessageRole.ASSISTANT,
+                    content=answer,
+                )
+            )
+
+            # 14. Display source information
             print("\nSources:")
+
             for rank, result in enumerate(
                 relevant_results, start=1
             ):

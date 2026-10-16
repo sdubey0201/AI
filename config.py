@@ -42,3 +42,28 @@ Question:
 Answer:
 """
 
+TOKEN_LIMIT = 2000
+
+
+QUERY_REWRITE_PROMPT_TEMPLATE = """
+You rewrite follow-up questions into standalone questions.
+
+Use the conversation history to resolve references such as
+"it", "its", "they", and "that".
+
+Rules:
+- Preserve the user's original intent.
+- If the question is already standalone, return it unchanged.
+- Do not answer the question.
+- Return only the rewritten question.
+
+Conversation history:
+{history}
+
+Current question:
+{question}
+
+Standalone question:
+"""
+
+
